@@ -7,78 +7,155 @@ No backend. No network requests. The entire LSP stack runs in the browser.
 ## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ Main Thread                                                      │
-│ ┌──────────────────┐      postMessage      ┌──────────────────┐ │
-│ │  Monaco Editor   │ ◄──────────────────► │  Web Worker       │ │
-│ │  (sysml lang)    │   (JSON-RPC 2.0)      │  (lsp-worker.js)  │ │
-│ └──────────────────┘                       └────────┬─────────┘ │
-│                                                     │             │
-└─────────────────────────────────────────────────────┼─────────────┘
-                                                      │
-                                          ┌───────────▼───────────┐
-                                          │  WASM (Rust compiled)  │
-                                          │  ┌───────────────────┐ │
-                                          │  │  tower-lsp Server │ │
-                                          │  │  (std LSP impl)   │ │
-                                          │  └────────┬──────────┘ │
-                                          │           │             │
-                                          │  ┌────────▼──────────┐ │
-                                          │  │ sysml-v2-parser   │ │
-                                          │  │ (Rust crate)      │ │
-                                          │  └───────────────────┘ │
-                                          └────────────────────────┘
+┌──── MAIN THREAD ───────────────────────┐  ┌──── WEB WORKER ───────────────────────────────┐
+│                                        │  │                                               │
+│  ┌─────────────────────────────────┐   │  │  ┌────────────────────────────────────────┐   │
+│  │        Monaco Editor            │   │  │  │          lsp-worker.js                 │   │
+│  │  ┌───────────────────────────┐  │   │  │  │                                        │   │
+│  │  │ Monarch Tokenizer         │  │   │  │  │  ┌──────────┐    ┌──────────────────┐  │   │
+│  │  │ (syntax highlighting)     │  │   │  │  │  │  Frame   │    │    Deframe       │  │   │
+│  │  └───────────────────────────┘  │   │  │  │  │ Encoder  │    │     Parser       │  │   │
+│  │  ┌───────────────────────────┐  │   │  │  │  │          │    │                  │  │   │
+│  │  │ LSP Providers             │  │   │  │  │  │ JSON  →  │    │  Content-Length  │  │   │
+│  │  │ · HoverProvider           │  │   │  │  │  │ Content- │    │  header  → JSON  │  │   │
+│  │  │ · CompletionProvider      │  │   │  │  │  │ Length   │    │                  │  │   │
+│  │  │ · Diagnostics (markers)   │  │   │  │  │  │ header   │    │                  │  │   │
+│  │  └───────────────────────────┘  │   │  │  │  └────┬─────┘    └────────┬─────────┘  │   │
+│  └──────────┬──────────────────────┘   │  │  │       │                   │            │   │
+│             │                          │  │  │       ▼                   ▲            │   │
+│             │  JSON-RPC 2.0            │  │  │  ┌─────────────────────────────┐       │   │
+│             │  postMessage()           │  │  │  │     WASM (Rust)             │       │   │
+│             │                          │  │  │  │                             │       │   │
+│             │  ┌── request/response ─┐ │  │  │  │  send_to_js()  ◄─channel──  │       │   │
+│             │  │     bridge          │ │  │  │  │      ▲                      │       │   │
+│             │  │  (Promise map by    │ │  │  │  │      │                      │       │   │
+│             │  │   JSON-RPC id)      │ │  │  │  │  ┌───┴──────────────────┐   │       │   │
+│             │  └─────────────────────┘ │  │  │  │  │   tower-lsp Server   │   │       │   │
+│             │                          │  │  │  │  │   LspService::new()  │   │       │   │
+│             ▼                          │  │  │  │  │                      │   │       │   │
+│  ┌──────────────────────┐              │  │  │  │  │  ┌────────────────┐  │   │       │   │
+│  │  publishDiagnostics  │              │  │  │  │  │  │    Backend     │  │   │       │   │
+│  │  → Monaco markers    │              │  │  │  │  │  │                │  │   │       │   │
+│  └──────────────────────┘              │  │  │  │  │  │ · initialize   │  │   │       │   │
+│                                        │  │  │  │  │  │ · did_open     │  │   │       │   │
+│                                        │  │  │  │  │  │ · did_change   │  │   │       │   │
+│                                        │  │  │  │  │  │ · completion   │  │   │       │   │
+│                                        │  │  │  │  │  │ · hover        │  │   │       │   │
+│                                        │  │  │  │  │  └───────┬────────┘  │   │       │   │
+│                                        │  │  │  │  │          │           │   │       │   │
+│                                        │  │  │  │  │  ┌───────▼────────┐  │   │       │   │
+│                                        │  │  │  │  │  │ sysml-v2-parser│  │   │       │   │
+│                                        │  │  │  │  │  │ parse_for_edit │  │   │       │   │
+│                                        │  │  │  │  │  └────────────────┘  │   │       │   │
+│                                        │  │  │  │  └──────────────────────┘   │       │   │
+│                                        │  │  │  └─────────────────────────────┘       │   │
+│                                        │  │  └────────────────────────────────────────┘   │
+└────────────────────────────────────────┘  └───────────────────────────────────────────────┘
+```
+
+## Message Flow
+
+A keystroke in the editor triggers this full round-trip:
+
+```
+  Monaco                Web Worker              Rust/WASM (tower-lsp)
+  ──────                ──────────              ─────────────────────
+     │                      │                           │
+     │  didChange (JSON)    │                           │
+     │─────────────────────►│                           │
+     │                      │                           │
+     │                      │  frame + Content-Length   │
+     │                      │  header bytes             │
+     │                      │──────────────────────────►│
+     │                      │                           │
+     │                      │                    ┌──────┴──────┐
+     │                      │                    │ LspReader   │
+     │                      │                    │ poll_read() │
+     │                      │                    │ reads frame │
+     │                      │                    └──────┬──────┘
+     │                      │                           │
+     │                      │                    ┌──────┴──────┐
+     │                      │                    │ Backend     │
+     │                      │                    │ did_change()│
+     │                      │                    │   → parse   │
+     │                      │                    │   → publish │
+     │                      │                    │ diagnostics │
+     │                      │                    └──────┬──────┘
+     │                      │                           │
+     │                      │                    ┌──────┴──────┐
+     │                      │                    │ LspWriter   │
+     │                      │                    │ poll_write()│
+     │                      │                    │ → send_to_js│
+     │                      │                    └──────┬──────┘
+     │                      │                           │
+     │                      │  framed bytes             │
+     │                      │◄──────────────────────────│
+     │                      │                           │
+     │                      │  deframe (parse header)   │
+     │                      │                           │
+     │ publishDiagnostics   │                           │
+     │◄─────────────────────│                           │
+     │                      │                           │
+  ┌──┴──────────┐           │                           │
+  │ setModel    │           │                           │
+  │ Markers()   │           │                           │
+  └─────────────┘           │                           │
+```
+
+### Request/Response Flow (completion, hover)
+
+```
+  Monaco                Web Worker              Rust/WASM
+  ──────                ──────────              ─────────
+     │                      │                      │
+     │  completion (JSON)   │                      │
+     │  id: 3 ─────────────►│                      │
+     │                      │  framed bytes ──────►│
+     │                      │                      │
+     │              Promise │                      │
+     │              pending │  ◄── framed bytes ───│
+     │                      │  (id: 3, result)     │
+     │  resolve(id: 3) ◄────│                      │
+     │                      │                      │
+  ┌──┴──────────────────┐   │                      │
+  │ suggestions show up │   │                      │
+  │ in editor dropdown  │   │                      │
+  └─────────────────────┘   │                      │
 ```
 
 ## How It Works
 
-### 1. Standard LSP Protocol (tower-lsp)
+### LSP Protocol (tower-lsp)
 
-The Rust backend (`src/lib.rs`) implements a fully standard [Language Server Protocol](https://microsoft.github.io/language-server-protocol/) server using the `tower-lsp` crate. It supports:
+The Rust backend (`src/lib.rs`) implements a fully standard [Language Server Protocol](https://microsoft.github.io/language-server-protocol/) server using `tower-lsp` in `runtime-agnostic` mode — no Tokio needed, just `wasm-bindgen-futures`.
 
-- **`textDocument/didOpen`** — validates a file on open
-- **`textDocument/didChange`** — re-validates on every keystroke (full sync)
-- **`textDocument/completion`** — keyword + identifier completions
-- **`textDocument/hover`** — hover information at any position
-- **`textDocument/publishDiagnostics`** — parse errors from `sysml-v2-parser`
+### WASM I/O Bridge
 
-The server uses `runtime-agnostic` mode, meaning it doesn't need Tokio or any async runtime beyond what `wasm-bindgen-futures` provides in the browser.
+tower-lsp expects byte-level `AsyncRead`/`AsyncWrite` streams (stdin/stdout in a native binary). Two custom structs bridge this to the browser:
 
-### 2. WebAssembly I/O Bridge
+| Component | Trait | Mechanism |
+|---|---|---|
+| **`LspReader`** | `AsyncRead` | Polls a futures `mpsc` channel fed by `handle_message_from_js()` |
+| **`LspWriter`** | `AsyncWrite` | Calls the JS global `send_to_js()` on every write |
 
-tower-lsp needs byte-level `AsyncRead`/`AsyncWrite` streams to read/write LSP frames. In a native Rust binary this would be stdin/stdout. In the browser, two custom structs provide this:
+### LSP Framing
 
-- **`LspReader`** — implements `AsyncRead` over a futures `mpsc` channel. Bytes arrive from JavaScript via `handle_message_from_js()` → channel → polled by tower-lsp.
-- **`LspWriter`** — implements `AsyncWrite`, calling a `send_to_js` JavaScript function for every write. This function is exposed from Rust with `#[wasm_bindgen]` and implemented in the Web Worker.
-
-### 3. LSP Framing (Content-Length Headers)
-
-The standard LSP transport uses `Content-Length` headers to delimit messages:
+Messages use standard `Content-Length` header framing. JavaScript handles encoding/decoding — Rust only sees raw bytes:
 
 ```
 Content-Length: 42\r\n\r\n{"jsonrpc":"2.0","method":"initialize",...}
 ```
 
-This framing happens in JavaScript (`lsp-worker.js`), not in Rust:
+- **JS → Rust**: JSON-RPC is framed with headers, then pushed into the `mpsc` channel
+- **Rust → JS**: tower-lsp writes framed bytes → `send_to_js()` → JS deframer extracts JSON → `postMessage()` to main thread
 
-- **JS → Rust**: Each JSON-RPC message from Monaco is prefixed with `Content-Length: N\r\n\r\n` before being pushed into the Rust reader.
-- **Rust → JS**: The Rust writer outputs framed bytes. The JS side parses the headers, extracts the JSON payload, and forwards it via `postMessage` to the main thread.
+### Request/Response Bridge
 
-### 4. Web Worker Transport
+Monaco providers (hover, completion) are promise-based. The main thread maintains a `Map<requestId, resolveFn>`. When the worker posts back a response with a matching `id`, the promise resolves and the provider returns its result.
 
-All LSP traffic runs inside a **Web Worker** (`dist/lsp-worker.js`). This keeps the WASM compilation and parser execution off the main thread, preventing UI jank. Communication between Monaco (main thread) and the worker uses `postMessage` with JSON-RPC 2.0 payloads.
+### Web Worker
 
-### 5. Monaco Editor Integration
-
-On the main thread (`resources/index.html`):
-
-- A custom `sysml` language is registered with Monarch tokenizer rules for syntax highlighting.
-- Three LSP features are wired to Monaco providers:
-  - **Diagnostics** — `textDocument/publishDiagnostics` results become Monaco markers
-  - **Hover** — `textDocument/hover` responses display as Monaco hover widgets
-  - **Completions** — `textDocument/completion` results populate the suggestion list, triggered on `:`, `;`, `.`
-
-A request/response bridge maps JSON-RPC IDs to pending promises, allowing Monaco providers (which return promises) to await LSP responses from the worker.
+All WASM runs inside a dedicated Web Worker — parsing and LSP logic never block the main thread.
 
 ## Project Structure
 

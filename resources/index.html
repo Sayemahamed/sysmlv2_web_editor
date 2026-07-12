@@ -1,17 +1,315 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 
 <head>
     <meta charset="utf-8">
-    <title>Browser-Based SysML v2 IDE</title>
+    <title>SysML v2 Browser IDE</title>
     <!-- Import Monaco Loader -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #121212;
+            --panel-bg: #1e1e1e;
+            --header-bg: #1a1a1a;
+            --border-color: #2d2d2d;
+            --text-color: #cccccc;
+            --accent-color: #007acc;
+            --error-color: #f48771;
+            --success-color: #89d185;
+            --info-color: #3794ff;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body,
+        html {
+            width: 100%;
+            height: 100%;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            overflow: hidden;
+        }
+
+        /* IDE Layout */
+        .ide-container {
+            display: flex;
+            flex-direction: column;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        /* Header Navbar */
+        header {
+            background-color: var(--header-bg);
+            border-bottom: 1px solid var(--border-color);
+            padding: 10px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            height: 50px;
+        }
+
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo-title {
+            font-size: 14px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            color: #ffffff;
+        }
+
+        /* Status Indicator */
+        .status-badge {
+            font-size: 11px;
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .status-badge::before {
+            content: '';
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        .status-loading {
+            background-color: rgba(235, 156, 49, 0.15);
+            color: #eb9c31;
+        }
+
+        .status-loading::before {
+            background-color: #eb9c31;
+        }
+
+        .status-ready {
+            background-color: rgba(137, 209, 133, 0.15);
+            color: var(--success-color);
+        }
+
+        .status-ready::before {
+            background-color: var(--success-color);
+        }
+
+        /* Main Workspace Splitting */
+        .workspace {
+            display: flex;
+            flex: 1;
+            height: calc(100% - 50px);
+            width: 100%;
+        }
+
+        .editor-pane {
+            flex: 2;
+            height: 100%;
+            border-right: 1px solid var(--border-color);
+        }
+
+        #container {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Side Dashboard Panel */
+        .dashboard-pane {
+            flex: 1;
+            min-width: 350px;
+            max-width: 500px;
+            display: flex;
+            flex-direction: column;
+            background-color: var(--panel-bg);
+            height: 100%;
+        }
+
+        /* Tab System */
+        .tab-bar {
+            display: flex;
+            background-color: var(--header-bg);
+            border-bottom: 1px solid var(--border-color);
+            height: 35px;
+        }
+
+        .tab-btn {
+            background: none;
+            border: none;
+            color: #888888;
+            font-size: 12px;
+            padding: 0 16px;
+            cursor: pointer;
+            height: 100%;
+            border-right: 1px solid var(--border-color);
+            transition: background 0.2s, color 0.2s;
+        }
+
+        .tab-btn:hover {
+            background-color: rgba(255, 255, 255, 0.03);
+            color: #ffffff;
+        }
+
+        .tab-btn.active {
+            background-color: var(--panel-bg);
+            color: #ffffff;
+            border-bottom: 2px solid var(--accent-color);
+        }
+
+        /* Tab Content Panes */
+        .tab-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 15px;
+            display: none;
+        }
+
+        .tab-content.active {
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Problems List Styling */
+        .problem-item {
+            background-color: rgba(244, 135, 113, 0.05);
+            border-left: 3px solid var(--error-color);
+            padding: 10px;
+            border-radius: 0 4px 4px 0;
+            margin-bottom: 8px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .problem-item:hover {
+            background-color: rgba(244, 135, 113, 0.12);
+        }
+
+        .problem-meta {
+            font-size: 11px;
+            color: #888888;
+            margin-bottom: 4px;
+        }
+
+        .problem-msg {
+            font-size: 12px;
+            color: #e5e5e5;
+            font-family: monospace;
+            word-break: break-all;
+        }
+
+        .no-problems {
+            color: var(--success-color);
+            text-align: center;
+            font-size: 12px;
+            margin-top: 40px;
+        }
+
+        /* Diagnostic Console Term Style */
+        .log-console {
+            background-color: #0d0d0d;
+            border-radius: 4px;
+            flex: 1;
+            font-family: "Consolas", "Courier New", monospace;
+            font-size: 11px;
+            padding: 10px;
+            overflow-y: auto;
+            border: 1px solid #222;
+        }
+
+        .log-line {
+            margin-bottom: 6px;
+            line-height: 1.4;
+            white-space: pre-wrap;
+        }
+
+        .log-in {
+            color: var(--success-color);
+        }
+
+        .log-out {
+            color: var(--info-color);
+        }
+
+        .log-sys {
+            color: #888888;
+        }
+    </style>
 </head>
 
 <body>
-    <div id="container" style="width:100%;height:90vh;border:1px solid #ccc"></div>
+    <div class="ide-container">
+        <!-- Top Navbar -->
+        <header>
+            <div class="logo-section">
+                <span class="logo-title">SysML v2 Browser IDE</span>
+            </div>
+            <div>
+                <span id="statusBadge" class="status-badge status-loading">Initializing WASM...</span>
+            </div>
+        </header>
+
+        <!-- Main Workspace Section -->
+        <div class="workspace">
+            <!-- Left Side: Monaco Editor Container -->
+            <div class="editor-pane">
+                <div id="container"></div>
+            </div>
+
+            <!-- Right Side: Dashboard Panel (Tabs) -->
+            <div class="dashboard-pane">
+                <div class="tab-bar">
+                    <button class="tab-btn active" onclick="switchTab('problems-tab', this)">Problems</button>
+                    <button class="tab-btn" onclick="switchTab('logs-tab', this)">LSP Console Logs</button>
+                </div>
+
+                <!-- Problems Dashboard Content -->
+                <div id="problems-tab" class="tab-content active">
+                    <div id="problemsList">
+                        <div class="no-problems">No syntax errors found. Your SysML v2 models look clean!</div>
+                    </div>
+                </div>
+
+                <!-- Live Log Terminal Content -->
+                <div id="logs-tab" class="tab-content">
+                    <div class="log-console" id="logConsole">
+                        <div class="log-line log-sys">[System] Dashboard initialized. Waiting for WASM compile loop...
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <script>
+        // Log helpers to write diagnostic output to the custom on-screen Terminal Tab
+        const consoleEl = document.getElementById('logConsole');
+        function logToConsole(message, direction = 'sys') {
+            const line = document.createElement('div');
+            line.className = `log-line log-${direction}`;
+            const timestamp = new Date().toLocaleTimeString();
+            line.textContent = `[${timestamp}] ${direction === 'in' ? '↙ FROM RUST' : direction === 'out' ? '↗ TO RUST' : '⚙ SYSTEM'}: ${message}`;
+            consoleEl.appendChild(line);
+            consoleEl.scrollTop = consoleEl.scrollHeight;
+        }
+
+        // Handles split dashboard tabs switching
+        window.switchTab = function (tabId, element) {
+            document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            document.getElementById(tabId).classList.add('active');
+            element.classList.add('active');
+        };
+
         console.log("%c[Main] Page loaded. Configuring Monaco loader...", "color: lime; font-weight: bold;");
 
         require.config({ paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.39.0/min/vs' } });
@@ -60,25 +358,27 @@
                 }
             });
 
-            // Initialize the Web Worker (no modifications to lsp-worker.js needed)
+            // Initialize the Web Worker
             const worker = new Worker('./lsp-worker.js', { type: 'module' });
 
             let requestId = 0;
             const pendingRequests = new Map();
+            let editorInstance = null; // Global editor holder to navigate cursor via click events
 
             // Receive processed requests and notifications from Web Worker
             worker.onmessage = (event) => {
                 const message = event.data;
-                console.log("%c[Main] Message received from Web Worker:", "color: #00ff00;", message);
+                logToConsole(JSON.stringify(message), 'in');
 
+                // Handle standard LSP publishDiagnostics notifications sent from Rust
                 if (message.method === 'textDocument/publishDiagnostics') {
                     const { uri, diagnostics } = message.params;
-                    console.log(`%c[Main] Setting ${diagnostics.length} diagnostic markers in Monaco...`, "color: orange; font-weight: bold;");
                     const model = monaco.editor.getModel(monaco.Uri.parse(uri));
                     if (model) {
+                        // Map Rust's parsed diagnostic data to Monaco markers
                         const markers = diagnostics.map(d => ({
                             severity: monaco.MarkerSeverity.Error,
-                            message: `${d.message} (via SysML v2 Parser)`,
+                            message: d.message,
                             startLineNumber: d.range.start.line + 1,
                             startColumn: d.range.start.character + 1,
                             endLineNumber: d.range.end.line + 1,
@@ -86,6 +386,7 @@
                         }));
 
                         monaco.editor.setModelMarkers(model, 'wasm-lsp', markers);
+                        updateProblemsDashboard(diagnostics);
                     }
                     return;
                 }
@@ -99,6 +400,42 @@
                 }
             };
 
+            // Programmatically builds and updates the interactive list in the Problems sidebar
+            function updateProblemsDashboard(diagnostics) {
+                const listEl = document.getElementById('problemsList');
+                listEl.innerHTML = '';
+
+                if (diagnostics.length === 0) {
+                    listEl.innerHTML = '<div class="no-problems">No syntax errors found. Your SysML v2 models look clean!</div>';
+                    return;
+                }
+
+                diagnostics.forEach(diag => {
+                    const item = document.createElement('div');
+                    item.className = 'problem-item';
+
+                    const lineNum = diag.range.start.line + 1;
+                    const colNum = diag.range.start.character + 1;
+
+                    item.innerHTML = `
+                        <div class="problem-meta">Line ${lineNum}, Column ${colNum}</div>
+                        <div class="problem-msg">${diag.message}</div>
+                    `;
+
+                    // Focus the editor viewport exactly at the coordinates when clicked
+                    item.addEventListener('click', () => {
+                        if (editorInstance) {
+                            editorInstance.setPosition({ lineNumber: lineNum, column: colNum });
+                            editorInstance.revealPositionInCenter({ lineNumber: lineNum, column: colNum });
+                            editorInstance.focus();
+                        }
+                    });
+
+                    listEl.appendChild(item);
+                });
+            }
+
+            // Dispatch helper
             function sendRequest(method, params) {
                 return new Promise((resolve) => {
                     const id = requestId++;
@@ -109,14 +446,15 @@
                         method,
                         params
                     };
-                    console.log(`%c[Main] Sending request [${method}] with ID ${id}`, "color: #00bcff;", requestPayload);
+                    logToConsole(JSON.stringify(requestPayload), 'out');
                     worker.postMessage(requestPayload);
                 });
             }
 
+            // Perform LSP initialization handshake on startup
             async function initLsp(model) {
                 try {
-                    console.log("%c[Main] Initiating LSP handshake...", "color: #ffaa00; font-weight: bold;");
+                    logToConsole('Initiating standard LSP Handshake sequence...', 'sys');
                     const initResult = await sendRequest('initialize', {
                         processId: null,
                         rootUri: null,
@@ -124,7 +462,12 @@
                         workspaceFolders: null
                     });
 
-                    console.log("%c[Main] Handshake approved! Server capabilities:", "color: #ffaa00; font-weight: bold;", initResult);
+                    // Update UI status badge once handshake responds
+                    const badge = document.getElementById('statusBadge');
+                    badge.textContent = 'LSP Ready';
+                    badge.className = 'status-badge status-ready';
+
+                    logToConsole('Handshake approved by Rust Language Server.', 'sys');
 
                     worker.postMessage({
                         jsonrpc: '2.0',
@@ -132,7 +475,7 @@
                         params: {}
                     });
 
-                    console.log("%c[Main] Sending textDocument/didOpen notification...", "color: gray;");
+                    // Send didOpen notification so Rust receives the initial document state
                     worker.postMessage({
                         jsonrpc: '2.0',
                         method: 'textDocument/didOpen',
@@ -148,22 +491,30 @@
 
                 } catch (error) {
                     console.error("[Main] LSP initialization handshake failed:", error);
+                    const badge = document.getElementById('statusBadge');
+                    badge.textContent = 'Error Loading WASM';
+                    badge.style.backgroundColor = 'red';
                 }
             }
 
-            // Create Monaco Editor Instance with standard SysML v2 sample value
+            // Create Monaco Editor Instance with custom 'sysml' language
             const editor = monaco.editor.create(document.getElementById('container'), {
                 value: 'package VehicleModel {\n\timport ScalarValues::*;\n\n\tpart def Vehicle;\n\n\tpart car : Vehicle {\n\t\tattribute mass : Real = 1500.0;\n\t\tperform action drive;\n\t}\n}',
                 language: 'sysml',
-                theme: 'vs-dark'
+                theme: 'vs-dark',
+                automaticLayout: true,
+                fontSize: 13,
+                fontFamily: 'Consolas, "Courier New", monospace'
             });
 
+            editorInstance = editor;
             const model = editor.getModel();
 
+            // Run the handshake
             initLsp(model);
 
+            // Send real-time didChange notifications as the user types
             model.onDidChangeContent(() => {
-                console.log("%c[Main] Text changed! Sending textDocument/didChange to Rust...", "color: gray;");
                 worker.postMessage({
                     jsonrpc: '2.0',
                     method: 'textDocument/didChange',
@@ -194,7 +545,7 @@
                 }
             });
 
-            // Register Completion Provider for SysML v2 keywords and symbols
+            // Register Completion Provider
             monaco.languages.registerCompletionItemProvider('sysml', {
                 triggerCharacters: [':', ';', '.'],
                 provideCompletionItems: async (model, position) => {
