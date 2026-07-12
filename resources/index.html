@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <title>Browser-Based SysML v2 IDE</title>
+    <!-- Import Monaco Loader -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js"></script>
+</head>
+
+<body>
+    <div id="container" style="width:100%;height:90vh;border:1px solid #ccc"></div>
+
+    <script>
+        console.log("%c[Main] Page loaded. Configuring Monaco loader...", "color: lime; font-weight: bold;");
+
+        require.config({ paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.39.0/min/vs' } });
+
+        require(['vs/editor/editor.main'], function () {
+            console.log("%c[Main] Monaco core loaded! Creating Web Worker...", "color: lime; font-weight: bold;");
+
+            // 1. Register the custom SysML v2 Language inside Monaco
+            monaco.languages.register({ id: 'sysml' });
+
+            // 2. Define Monarch Tokenizer for Syntax Highlighting
+            monaco.languages.setMonarchTokensProvider('sysml', {
+                keywords: [
+                    'package', 'import', 'part', 'attribute', 'port', 'action', 'state',
+                    'connection', 'item', 'def', 'ref', 'doc', 'metadata', 'individual',
+                    'occurrence', 'structure', 'behavior', 'constraint', 'requirement',
+                    'calculation', 'analysis', 'view', 'viewpoint', 'rendering', 'exhibit',
+                    'perform', 'flow', 'interface', 'transition', 'as', 'by', 'to', 'from',
+                    'public', 'private', 'scalar'
+                ],
+                tokenizer: {
+                    root: [
+                        [/[a-zA-Z_]\w*/, {
+                            cases: {
+                                '@keywords': 'keyword',
+                                '@default': 'identifier'
+                            }
+                        }],
+                        { include: '@whitespace' },
+                        [/[{}()\[\]]/, 'delimiter.bracket'],
+                        [/[;,.:]/, 'delimiter'],
+                        [/"([^"\\]|\\.)*"/, 'string'],
+                        [/\d+(\.\d+)?/, 'number'],
+                    ],
+                    whitespace: [
+                        [/[ \t\r\n]+/, 'white'],
+                        [/\/\*/, 'comment', '@comment'],
+                        [/\/\/.*$/, 'comment'],
+                    ],
+                    comment: [
+                        [/[^\/*]+/, 'comment'],
+                        [/\/\*/, 'comment', '@push'],
+                        ["\\*/", 'comment', '@pop'],
+                        [/[\/*]/, 'comment']
+                    ],
+                }
+            });
+
+            // Initialize the Web Worker (no modifications to lsp-worker.js needed)
+            const worker = new Worker('./lsp-worker.js', { type: 'module' });
+
+            let requestId = 0;
+            const pendingRequests = new Map();
+
+            // Receive processed requests and notifications from Web Worker
+            worker.onmessage = (event) => {
+                const message = event.data;
+                console.log("%c[Main] Message received from Web Worker:", "color: #00ff00;", message);
+
+                if (message.method === 'textDocument/publishDiagnostics') {
+                    const { uri, diagnostics } = message.params;
+                    console.log(`%c[Main] Setting ${diagnostics.length} diagnostic markers in Monaco...`, "color: orange; font-weight: bold;");
+                    const model = monaco.editor.getModel(monaco.Uri.parse(uri));
+                    if (model) {
+                        const markers = diagnostics.map(d => ({
+                            severity: monaco.MarkerSeverity.Error,
+                            message: `${d.message} (via SysML v2 Parser)`,
+                            startLineNumber: d.range.start.line + 1,
+                            startColumn: d.range.start.character + 1,
+                            endLineNumber: d.range.end.line + 1,
+                            endColumn: d.range.end.character + 1
+                        }));
+
+                        monaco.editor.setModelMarkers(model, 'wasm-lsp', markers);
+                    }
+                    return;
+                }
+
+                if (message.id !== undefined) {
+                    const resolve = pendingRequests.get(message.id);
+                    if (resolve) {
+                        resolve(message.result);
+                        pendingRequests.delete(message.id);
+                    }
+                }
+            };
+
+            function sendRequest(method, params) {
+                return new Promise((resolve) => {
+                    const id = requestId++;
+                    pendingRequests.set(id, resolve);
+                    const requestPayload = {
+                        jsonrpc: '2.0',
+                        id,
+                        method,
+                        params
+                    };
+                    console.log(`%c[Main] Sending request [${method}] with ID ${id}`, "color: #00bcff;", requestPayload);
+                    worker.postMessage(requestPayload);
+                });
+            }
+
+            async function initLsp(model) {
+                try {
+                    console.log("%c[Main] Initiating LSP handshake...", "color: #ffaa00; font-weight: bold;");
+                    const initResult = await sendRequest('initialize', {
+                        processId: null,
+                        rootUri: null,
+                        capabilities: {},
+                        workspaceFolders: null
+                    });
+
+                    console.log("%c[Main] Handshake approved! Server capabilities:", "color: #ffaa00; font-weight: bold;", initResult);
+
+                    worker.postMessage({
+                        jsonrpc: '2.0',
+                        method: 'initialized',
+                        params: {}
+                    });
+
+                    console.log("%c[Main] Sending textDocument/didOpen notification...", "color: gray;");
+                    worker.postMessage({
+                        jsonrpc: '2.0',
+                        method: 'textDocument/didOpen',
+                        params: {
+                            textDocument: {
+                                uri: model.uri.toString(),
+                                languageId: 'sysml',
+                                version: model.getVersionId(),
+                                text: model.getValue()
+                            }
+                        }
+                    });
+
+                } catch (error) {
+                    console.error("[Main] LSP initialization handshake failed:", error);
+                }
+            }
+
+            // Create Monaco Editor Instance with standard SysML v2 sample value
+            const editor = monaco.editor.create(document.getElementById('container'), {
+                value: 'package VehicleModel {\n\timport ScalarValues::*;\n\n\tpart def Vehicle;\n\n\tpart car : Vehicle {\n\t\tattribute mass : Real = 1500.0;\n\t\tperform action drive;\n\t}\n}',
+                language: 'sysml',
+                theme: 'vs-dark'
+            });
+
+            const model = editor.getModel();
+
+            initLsp(model);
+
+            model.onDidChangeContent(() => {
+                console.log("%c[Main] Text changed! Sending textDocument/didChange to Rust...", "color: gray;");
+                worker.postMessage({
+                    jsonrpc: '2.0',
+                    method: 'textDocument/didChange',
+                    params: {
+                        textDocument: {
+                            uri: model.uri.toString(),
+                            version: model.getVersionId()
+                        },
+                        contentChanges: [
+                            { text: model.getValue() }
+                        ]
+                    }
+                });
+            });
+
+            // Register Hover Provider
+            monaco.languages.registerHoverProvider('sysml', {
+                provideHover: async (model, position) => {
+                    const response = await sendRequest('textDocument/hover', {
+                        textDocument: { uri: model.uri.toString() },
+                        position: { line: position.lineNumber - 1, character: position.column - 1 }
+                    });
+                    if (!response) return null;
+                    return {
+                        range: new monaco.Range(position.lineNumber, 1, position.lineNumber, model.getLineMaxColumn(position.lineNumber)),
+                        contents: [{ value: response.contents.value }]
+                    };
+                }
+            });
+
+            // Register Completion Provider for SysML v2 keywords and symbols
+            monaco.languages.registerCompletionItemProvider('sysml', {
+                triggerCharacters: [':', ';', '.'],
+                provideCompletionItems: async (model, position) => {
+                    const response = await sendRequest('textDocument/completion', {
+                        textDocument: { uri: model.uri.toString() },
+                        position: { line: position.lineNumber - 1, character: position.column - 1 }
+                    });
+                    if (!response) return { suggestions: [] };
+
+                    const suggestions = response.map(item => ({
+                        label: item.label,
+                        kind: monaco.languages.CompletionItemKind.Keyword,
+                        insertText: item.insertText || item.label,
+                        detail: item.detail,
+                        range: {
+                            startLineNumber: position.lineNumber,
+                            endLineNumber: position.lineNumber,
+                            startColumn: position.column - 1,
+                            endColumn: position.column
+                        }
+                    }));
+                    return { suggestions };
+                }
+            });
+        });
+    </script>
+</body>
+
+</html>
