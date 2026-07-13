@@ -1,8 +1,21 @@
 # SysML v2 Browser IDE
 
-A fully browser-based SysML v2 code editor with live diagnostics, completions, and hover — powered by a **standard LSP protocol server** compiled to WebAssembly via Rust.
+**Live Demo: [sysmlv2.thesayem.pro.bd](https://sysmlv2.thesayem.pro.bd/)**
 
-No backend. No network requests. The entire LSP stack runs in the browser.
+A client-side SysML v2 editor featuring live diagnostics, autocompletion, and hover tooltips. The editor is powered by a standard Language Server Protocol (LSP) implementation, written in Rust and compiled to WebAssembly (WASM) to run entirely within the browser.
+
+By executing the language server in a Web Worker, the IDE processes code analysis and syntax diagnostics locally, eliminating the need for a backend server or network-based LSP communication.
+
+---
+
+## Key Features
+
+- **Local Execution:** No compilation backends or remote servers required.
+- **Background Processing:** Parsing and analysis run in a dedicated Web Worker to prevent UI lag.
+- **Monaco Editor Integration:** Supports standard editor behaviors including real-time diagnostics (squigglies), autocomplete suggestions, and hover documentation.
+- **Standard LSP Compliance:** Uses a standard Rust LSP implementation (`tower-lsp`) adapted for WebAssembly.
+
+---
 
 ## Architecture Overview
 
@@ -53,9 +66,13 @@ No backend. No network requests. The entire LSP stack runs in the browser.
 └────────────────────────────────────────┘  └───────────────────────────────────────────────┘
 ```
 
+---
+
 ## Message Flow
 
-A keystroke in the editor triggers this full round-trip:
+### Document Updates & Diagnostics (Notification Flow)
+
+When a user edits the document, the change is transmitted asynchronously down to the WebAssembly parser, which returns validation markers:
 
 ```
   Monaco                Web Worker              Rust/WASM (tower-lsp)
@@ -102,7 +119,9 @@ A keystroke in the editor triggers this full round-trip:
   └─────────────┘           │                           │
 ```
 
-### Request/Response Flow (completion, hover)
+### Request/Response Flow (Completions & Hover)
+
+For features requiring direct replies, a promise-based transaction registry tracks requests by their JSON-RPC transaction ID:
 
 ```
   Monaco                Web Worker              Rust/WASM
@@ -123,94 +142,92 @@ A keystroke in the editor triggers this full round-trip:
   └─────────────────────┘   │                      │
 ```
 
-## How It Works
+---
 
-### LSP Protocol (tower-lsp)
+## Technical Details
 
-The Rust backend (`src/lib.rs`) implements a fully standard [Language Server Protocol](https://microsoft.github.io/language-server-protocol/) server using `tower-lsp` in `runtime-agnostic` mode — no Tokio needed, just `wasm-bindgen-futures`.
+### 1. The LSP Server
+The core server is implemented in `src/lib.rs` using `tower-lsp`. Because compilation targets the browser environment (`wasm32-unknown-unknown`), standard asynchronous runtimes (like Tokio) are not compatible. The server is configured in `runtime-agnostic` mode, relying on `wasm-bindgen-futures` for execution.
 
-### WASM I/O Bridge
+### 2. WASM I/O Bridging
+Standard LSP frameworks expect system-level I/O streams (typically standard input/output). To accommodate this in a browser environment, two custom structures bridge JavaScript message passing with Rust's asynchronous streams:
 
-tower-lsp expects byte-level `AsyncRead`/`AsyncWrite` streams (stdin/stdout in a native binary). Two custom structs bridge this to the browser:
+*   **`LspReader` (implements `AsyncRead`):** Polls an internal futures `mpsc` channel. This channel is populated by external JavaScript calls to the exported `handle_message_from_js()` function.
+*   **`LspWriter` (implements `AsyncWrite`):** Converts output stream bytes into calls to a global JavaScript handler, `send_to_js()`.
 
-| Component | Trait | Mechanism |
-|---|---|---|
-| **`LspReader`** | `AsyncRead` | Polls a futures `mpsc` channel fed by `handle_message_from_js()` |
-| **`LspWriter`** | `AsyncWrite` | Calls the JS global `send_to_js()` on every write |
+### 3. Protocol Framing
+LSP messages require structural framing based on the `Content-Length` header standard. To keep the compiled WASM binary smaller, framing/deframing operations are split:
+- **JS-side (Worker):** Receives raw JSON-RPC messages from the main thread, appends the appropriate `Content-Length` headers, and converts them to byte arrays before invoking the WASM bridge. It also decodes stream bytes emitted from Rust back into JSON structures.
+- **Rust-side:** Directly processes standard bytes streams, allowing `tower-lsp` to parse protocol headers naturally without writing custom serialization logic.
 
-### LSP Framing
-
-Messages use standard `Content-Length` header framing. JavaScript handles encoding/decoding — Rust only sees raw bytes:
-
-```
-Content-Length: 42\r\n\r\n{"jsonrpc":"2.0","method":"initialize",...}
-```
-
-- **JS → Rust**: JSON-RPC is framed with headers, then pushed into the `mpsc` channel
-- **Rust → JS**: tower-lsp writes framed bytes → `send_to_js()` → JS deframer extracts JSON → `postMessage()` to main thread
-
-### Request/Response Bridge
-
-Monaco providers (hover, completion) are promise-based. The main thread maintains a `Map<requestId, resolveFn>`. When the worker posts back a response with a matching `id`, the promise resolves and the provider returns its result.
-
-### Web Worker
-
-All WASM runs inside a dedicated Web Worker — parsing and LSP logic never block the main thread.
+---
 
 ## Project Structure
 
 ```
-├── Cargo.toml              # Rust project manifest
+├── Cargo.toml                  # Rust dependency and WASM build settings
 ├── src/
-│   └── lib.rs              # LSP server implementation (Backend)
+│   └── lib.rs                  # LSP Server implementation and WASM bindings
 ├── resources/
-│   └── index.html          # Monaco Editor + provider registrations
+│   └── index.html              # Frontend source containing Monaco Editor configuration
 ├── dist/
-│   ├── index.html          # Built frontend (served by Bun)
-│   ├── lsp-worker.js       # Web Worker: WASM bridge + LSP framing
-│   └── pkg/                # wasm-pack build output
-│       ├── sysmlv2_web_editor.js      # JS glue (wasm-bindgen)
-│       ├── sysmlv2_web_editor_bg.wasm # compiled WASM binary
+│   ├── index.html              # Served frontend template
+│   ├── lsp-worker.js           # Worker file managing framing and WASM imports
+│   └── pkg/                    # wasm-pack build outputs
+│       ├── sysmlv2_web_editor.js      # Generated JS bindings
+│       ├── sysmlv2_web_editor_bg.wasm # Compiled WASM payload
 │       └── ...
-└── server.js               # Bun static file server (port 3000)
+└── server.js                   # Minimal Bun static asset server
 ```
 
-## Building & Running
+---
+
+## Installation & Running
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs) with the `wasm32-unknown-unknown` target
-- [wasm-pack](https://rustwasm.github.io/wasm-pack/)
-- [Bun](https://bun.sh) (for the dev server)
+To build and run the project locally, ensure you have the following tools installed:
 
-### Build
+*   [Rust](https://rustup.rs) (with `wasm32-unknown-unknown` target added via `rustup target add wasm32-unknown-unknown`)
+*   [wasm-pack](https://rustwasm.github.io/wasm-pack/)
+*   [Bun](https://bun.sh) (or Node.js)
 
-```bash
-# Compile Rust to WebAssembly
-wasm-pack build --target web --out-dir dist/pkg
+### Build Steps
 
-# Copy the frontend resources
-cp resources/index.html dist/
+1. **Compile the Rust codebase to WASM:**
+   ```bash
+   wasm-pack build --target web --out-dir dist/pkg
+   ```
 
-# (lsp-worker.js is maintained directly in dist/)
-```
+2. **Prepare the static web assets:**
+   ```bash
+   mkdir -p dist
+   cp resources/index.html dist/
+   ```
 
-### Run
+### Execution
+
+Start the development server using Bun:
 
 ```bash
 bun run server.js
-# Open http://localhost:3000
 ```
 
-## LSP Capability Matrix
+Once started, navigate to `http://localhost:3000` in your browser.
 
-| Feature | Standard LSP Method | Implemented |
-|---|---|---|
-| Document open validation | `textDocument/didOpen` | ✅ |
-| Live diagnostics on edit | `textDocument/didChange` | ✅ |
-| Publish diagnostics | `textDocument/publishDiagnostics` | ✅ |
-| Code completions | `textDocument/completion` | ✅ |
-| Hover information | `textDocument/hover` | ✅ |
-| Go to definition | `textDocument/definition` | ❌ |
-| Document symbols | `textDocument/documentSymbol` | ❌ |
-| Formatting | `textDocument/formatting` | ❌ |
+---
+
+## Feature Matrix & Implementation Status
+
+The table below describes the current implementation coverage of typical LSP features:
+
+| Feature | Standard LSP Method | Status | Notes |
+| :--- | :--- | :--- | :--- |
+| **Open Validation** | `textDocument/didOpen` | ✅ | Validates AST upon document load |
+| **Live Diagnostics** | `textDocument/didChange` | ✅ | Re-evaluates diagnostics during document edits |
+| **Diagnostics Publishing**| `textDocument/publishDiagnostics`| ✅ | Sends syntax errors to Monaco markers |
+| **Completions** | `textDocument/completion` | ✅ | Provides keyword and context completions |
+| **Hover Tooltips** | `textDocument/hover` | ✅ | Displays documentation on type/keyword hover |
+| **Go To Definition** | `textDocument/definition` | ❌ | Planned |
+| **Document Symbols** | `textDocument/documentSymbol` | ❌ | Planned |
+| **Formatting** | `textDocument/formatting` | ❌ | Planned |
